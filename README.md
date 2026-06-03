@@ -1,5 +1,11 @@
 # war
 
+> [!IMPORTANT]
+>
+> This is a **very early draft** for an archive format design.
+> It does not represent a final state, and almost certainly contains
+> mistakes, dead ends, etc.
+
 Paperware for a [Way better ARchive format] for Python packaging.
 
 [Way better ARchive format]: https://www.youtube.com/watch?v=ztZI2aLQ9Sw

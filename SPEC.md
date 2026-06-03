@@ -99,6 +99,9 @@ In addition, the following rules apply to name segments:
 - Name segments may not contain ASCII control codes (Unicode's `Cc` category)
 - Name segments may not contain conventional path separators (`/` or `\`)
 - Name segments may not equal either of the conventional directory references (`.` or `..`)
+- Name segments may not match [names reserved by Windows] such as `CON`, `PRN`, and `AUX`
+
+[names reserved by Windows]: https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
 
 The following is a short reference table demonstrating these rules:
 
@@ -117,6 +120,7 @@ The following is a short reference table demonstrating these rules:
 | `"/foo"`                 | ❌    | Segment contains a `/` |
 | `"foo\"`                 | ❌    | Segment contains a `\` |
 | `"\foo"`                 | ❌    | Segment contains a `\` |
+| `"CON"`                  | ❌    | Segment contains a forbidden name |
 
 
 #### `index.entries`

@@ -1,6 +1,6 @@
 # SPEC
 
-_Specification version_: 0.0.1
+_Specification version_: 0.0.2
 
 ## Structure of this document
 
@@ -8,56 +8,31 @@ This document uses Rust-style pseudocode to represent the various types/typestat
 
 ## Encoding
 
-> [!NOTE]
->
-> relish is being used as the encoding format for rapid prototyping/demonstration of
-> the design. A more permanent format will likely require a slightly distinct format
-> that is more streaming-friendly.
-
-war currently uses [relish] as its encoding format.
-
-See [relish]'s [SPEC][relish-spec] for concrete details on relish's binary serialization.
-
-[relish]: https://github.com/alex/relish
-
-[relish-spec]: https://github.com/alex/relish/blob/main/SPEC.md
+war does not currently define a binary encoding; the type definitions below
+are intended to be abstract.
 
 ## High-level layout
 
-war uses a header-index-heap layout:
+war uses a header-index-store layout:
 
 - The [_Header_](#header) uniquely identifies a war
-- The [_Index_](#index) provides a canonical representation of the archive's metadata
-- The [_Heap_](#heap) stores the archived data itself
+- The [_Index_](#index) provides a canonical representation of the archive's names
+- The [_Store_](#store) stores the archived data itself
 
-All three parts of a war are required. Each is encoded as a _discrete_ relish
-message.
+All three parts of a war are required, and must be encoded contiguously.
 
 ### Header
 
 The _header_ identifies the file as a valid war.
 
 ```rust
-#[derive(relish::Relish)]
 struct Header {
-    /// Fixed: 1
-    #[relish(field_id = 0)]
-    version: u8, 
     /// Fixed: b"war!"
-    #[relish(field_id = 1)]
     magic: u32,
+    /// Fixed: 1
+    version: u8, 
 }
 ```
-
-Observe that, because a war is a valid relish message, the header is prefixed by
-its surrounding framing (i.e. the tag and length components for the `Header`
-type itself).
-
-#### `header.version`
-
-`header.version` is always 1. 
-
-A parser shall reject any other version.
 
 #### `header.magic`
 
@@ -65,93 +40,39 @@ A parser shall reject any other version.
 
 A parser shall reject any other magic.
 
+#### `header.version`
+
+`header.version` is always 1. 
+
+A parser shall reject any other version.
+
 ### Index
 
-The [_Index_](#index) stores a canonical representation of the archive's metadata,
-including references into the [_Heap_](#heap).
+The [_Index_](#index) stores a canonical representation of the archive's names,
+with references into the [_Store_](#store) for the metadata and contents corresponding
+to each name.
+
+Internally, the index is a [finite state transducer] that efficiently represents
+the archive's names (by deduplicating common prefixes) and _transduces_ (i.e. maps)
+each archive name to an offset into [_Store_](#store).
+
+[finite state transducer]: https://en.wikipedia.org/wiki/Finite-state_transducer
 
 ```rust
-#[derive(relish::Relish)]
 struct Index {
-    #[relish(field_id = 0)]
-    entries: HashMap<Name, IndexEntry>
+    entries: Fst<Name>,
 }
 
 /// The name of an archive entry.
 struct Name {
-    #[relish(field_id = 0)]
     components: Vec<NameSegment>,
 }
 
 /// A single segment of an archive entry's name.
-#[derive(relish::Relish)]
-struct NameSegment(#[relish(field_id = 0)] String);
-
-/// A single index entry, providing metadata for an archive entry.
-#[derive(relish::Relish)]
-struct IndexEntry {
-    /// The entry's index, within the heap. 
-    #[relish(field_id = 0)]
-    index: u64,
-
-    /// A hint for the entry's decompressed size.
-    /// Observe that this is a _hint_, not a guaranteed size,
-    /// as a maliciously-constructed archive can always lie in its index.
-    #[relish(field_id = 1)]
-    uncompressed_size_hint: u64,
-
-    /// The entry's compression.
-    #[relish(field_id = 2)]
-    compression: Compression,
-
-    /// The entry's metadata (for unpacking).
-    #[relish(field_id = 3)]
-    metadata: Metadata,
-
-    #[relish(field_id = 3)]
-    integrity: Integrity
-}
-
-/// How an archive entry has been compressed.
-#[derive(relish::Relish)]
-enum Compression {
-    /// No compression.
-    #[relish(field_id = 0)]
-    Store,
-
-    /// Compressed with DEFLATE.
-    #[relish(field_id = 1)]
-    Deflate,
-
-    /// Compressed with zstd.
-    #[relish(field_id = 2)]
-    Zstd,
-}
-
-#[derive(relish::Relish)]
-struct Metadata {
-    /// The entry, when extracted, should be marked as "executable" in a
-    // host-specific manner.
-    #[relish(field_id = 0)]
-    executable: bool,
-}
-
-#[derive(relish::Relish)]
-struct Integrity {
-    #[relish(field_id = 0)]
-    crc32c: u32,
-}
+struct NameSegment(String);
 ```
 
-#### `index.entries`
-
-`index.entries` is a non-empty mapping of entry names to index metadata for each entry.
-
-A parser shall reject an empty mapping.
-
-#### `index.entries[name]`
-
-The [_Name_](#names) of each index metadatum is the name of the archived entry.
+### Names
 
 A [_Name_](#names) is a non-empty sequence of _name segments_, where a
 [_Name Segment_](#name-segments) is the delimited segment of a host-specific logical path.
@@ -162,87 +83,6 @@ The following table shows the relationship between logical paths and name segmen
 | ------- | ------------ | ------------- |
 | Windows | `foo\bar\baz`  | `["foo", "bar", "baz"]` |
 | POSIX   | `foo/bar/baz` | `["foo", "bar", "baz"]` |
-
-
-See [_Names_](#names) and [_Name Segments_](#name-segments) for validation requirements.
-
-### `index.entries.*.index`
-
-`index.entries.*.index` is a given entry's index into the heap.
-
-A parser shall reject any war whose heap index does not reference a heap entry.
-
-### `index.entries.*.uncompressed_size_hint`
-
-`index.entries.*.uncompressed_size_hint` is a _hint_ for the uncompressed entry's size.
-
-### `index.entries.*.compression`
-
-`index.entries.*.compression` is the method used to compress the entry (in the heap).
-
-war defines three compression methods:
-
-- A "stored" entry is stored verbatim, with no compression.
-- A "deflated" entry is compressed with the [DEFLATE] algorithm
-- A "zstd" entry is compressed with the [zstd] algorithm
-
-[DEFLATE]: https://datatracker.ietf.org/doc/html/rfc1951
-
-[zstd]: https://datatracker.ietf.org/doc/html/rfc8878
-
-### `index.entries.*.metadata`
-
-`index.entries.*.metadata` is an abstract representation of host-specific metadata that
-should be preserved during extraction.
-
-- `index.entries.*.metadata.executable`: the entry should be made executable when extracted
-
-### `index.entries.*.integrity`
-
-`index.entries.*.integrity` provides integrity guards for accidental data corruption.
-
-- `index.entries.*.integrity.crc32c`: the Castagnoli CRC-32 (polynomial `0x1EDC6F41`) of the entry's heap representation
-
-CRC-32C is selected for having hardware acceleration in common ISAs (x86_64 with SSE4.2, AArch64).
-
-A parser shall reject any war whose entry does not match its CRC-32C.
-
-### Heap
-
-The [_Heap_](#heap) stores compressed entries, as referenced by the [_Index_](#index).
-
-```rust
-#[derive(relish::Relish)]
-struct Heap {
-    #[relish(field_id = 0)]
-    entries: Vec<HeapEntry>,
-}
-
-#[derive(relish::Relish)]
-enum HeapEntry {
-    #[relish(field_id = 0)]
-    Data(Vec<u8>),
-    #[relish(field_id = 1)]
-    Link(Name),
-}
-```
-
-#### `heap.entries`
-
-`heap.entries` is a non-empty sequence of heap entries.
-
-A parser shall reject an empty sequence.
-
-#### `heap.entries[*]`
-
-Each heap entry is either a _data entry_ or a _link entry_:
-
-- A _data entry_ contains the binary data for its entry, compressed according to the
-  referent index entry's compression method.
-- A _link entry_ contains a [_Name_](#names) that the referent index entry's name
-  shall point to (in a host-specific manner) upon extraction. This is called the "link target."
-
-### Names
 
 A parser shall reject a name sequence that is empty, i.e. has no name segments.
 
@@ -278,6 +118,130 @@ The following is a short reference table demonstrating these rules:
 | `"foo\"`                 | ❌    | Segment contains a `\` |
 | `"\foo"`                 | ❌    | Segment contains a `\` |
 
+
+#### `index.entries`
+
+`index.entries` is a non-empty mapping (in the form of an FST) of entry [_Names_](#names) to
+storage offsets for each entry.
+
+Each offset is a `u64`, which in turn is an offset relative to the start of the [_Store_](#store).
+
+A parser shall reject an empty mapping.
+
+### Store
+
+The [_Store_](#store) stores compressed entries, as referenced by the [_Index_](#index).
+
+```rust
+struct Store {
+    entries: Vec<StoreEntry>,
+}
+
+enum StoreEntry {
+    /// A "regular file" entry.
+    File(File),
+    /// A directory entry.
+    Directory(())
+    /// A link entry.
+    Link(Link),
+}
+
+/// A regular file's metadata and contents in the store.
+struct File {
+    /// A hint for the entry's decompressed size.
+    uncompressed_size_hint: u64,
+
+    /// The entry's compression.
+    compression: Compression,
+
+    /// The entry's metadata (for unpacking).
+    metadata: Metadata,
+
+    /// The file's data, compressed according to the compression field.
+    data: Vec<u8>,
+}
+
+/// How an storage entry has been compressed.
+enum Compression {
+    /// No compression.
+    Store,
+
+    /// Compressed with DEFLATE.
+    Deflate,
+
+    /// Compressed with zstd.
+    Zstd,
+}
+
+struct Metadata {
+    /// The entry, when unpacked, should be marked as "executable" in a
+    // host-specific manner.
+    executable: bool,
+}
+
+struct Link {
+    /// The link's target.
+    target: Name,
+}
+```
+
+#### `store.entries`
+
+`store.entries` is a non-empty sequence of store entries.
+
+A parser shall reject an empty sequence.
+
+#### `store.entries[*]`
+
+Each store entry is either a [_File entry_](#file-entries), a
+[_Directory entry_](#directory-entries), or a
+[_Link entry_](#link-entries):
+
+### File entries
+
+A file entry represents a "regular" file, and contains the file's (compressed binary data)
+along with metadata needed to unpack the file.
+
+#### `uncompressed_size`
+
+`uncompressed_size` describes the size, in bytes, of the file entry after decompression.
+
+#### `compression`
+
+`compression` is the method used to compress the file entry.
+
+war defines three compression methods:
+
+- A "stored" entry is stored verbatim, with no compression.
+- A "deflated" entry is compressed with the [DEFLATE] algorithm
+- A "zstd" entry is compressed with the [zstd] algorithm
+
+[DEFLATE]: https://datatracker.ietf.org/doc/html/rfc1951
+
+[zstd]: https://datatracker.ietf.org/doc/html/rfc8878
+
+#### `metadata`
+
+`metadata` is an abstract representation of host-specific metadata that
+should be preserved during unpacking.
+
+- `metadata.executable`: the file entry should be made executable when unpacked
+
+### Directory entries
+
+A directory entry represents a directory. It is a marker (i.e. empty) entry that contains
+no additional data besides being associated with a [_Name_](#names) via the [_Index_](#index).
+
+Directory entries exist to explicitly mark a directory for creation during unpacking,
+such as when a directory is not implied to be created through the creation of dependent
+file entries. This occurs primarily when an archive wishes to create an empty directory.
+
+### Link entries
+
+A link entry represents a host-specific link between two [_Names_](#names) (a "source"
+and a "target"). The source is described by the [_Index_](#index), and the target
+is described within the link entry.
+
 ## Constructing a war
 
 ## Unpacking a war
@@ -296,24 +260,35 @@ Unpacking proceeds as follows:
    according to the rules above.
 1. A _temporary directory_ is created and used as the
    _temporary target directory_.
-1. The [_Index_](#index) is iterated; for each index entry:
-    1. The index entry's corresponding heap entry is located;
-    1. The heap entry is unpacked at a path relative to the _temporary target directory_,
-       corresponding to its name. See [_Entry unpacking_](#entry-unpacking).
+1. The [_Index_](#index) is iterated in order; for each index entry:
+    1. The index entry's corresponding store entry is located;
+    1. The store entry is unpacked at a path relative to the _temporary target directory_,
+       corresponding to its name. See [_Entry unpacking_](#entry-unpacking) for how
+       each kind of entry is unpacked.
 1. The _temporary target directory_ is atomically renamed to the _target directory_.
 
 ### Entry unpacking
 
-While [_Unpacking a war_](#unpacking-a-war), heap entries are handled as follows:
+While [_Unpacking a war_](#unpacking-a-war), store entries are handled as follows:
 
-- _Data entries_ are decompressed and written to disk at the path corresponding to their
+- [_File entries_](#file-entries) are decompressed and written to disk at the path corresponding to their
   [_Name_](#names). For example, if the _temporary target directory_ is `/tmp/abc/` and the
-  entry's name is `["foo", "bar.txt"]`, then the entry is written to
+  file entry's name is `["foo", "bar.txt"]`, then the entry is written to
   `/tmp/abc/foo/bar.txt`.
 
-- _Link entries_ are created in a host-specific manner. For example, a POSIX host may choose
+  An unpacker shall enforce that the decompressed size of an entry corresponds to the entry's
+  [_`uncompressed_size`_](#uncompressed_size).
+
+- [_Directory entries_](#directory-entries) are created by creating a directory at the path
+   corresponding to their [_Name_](#names). For example, if the _temporary target directory_ is `/tmp/abc/`
+   and the directory entry's name is `["def", "ghi"]`, then the directory is created as
+   `/tmp/abc/def/ghi/`.
+
+   Observe that this implies the creation of intermediate directories as well, in this case `/tmp/abc/def/`.
+
+- [_Link entries_](#link-entries) are created in a host-specific manner. For example, a POSIX host may choose
   to create a symbolic link, whereas a Windows host may choose to create an NTFS junction.
-  A war unpacker is _not_ required to enforce that the link's target exists at extraction time.
+  A war unpacker is _not_ required to enforce that the link's target exists at unpack time.
   However, by construction, a link target will always be relative to the _target directory_
   and will never point outside of it.
 
@@ -324,6 +299,10 @@ While [_Unpacking a war_](#unpacking-a-war), heap entries are handled as follows
       _temporary target directory_, but have them point to the _target directory_.
       This effectively produces an invalid intermediate state, but preserves atomicity
       when the _temporary target directory_ is renamed.
+
+Entries are created with host-specific permissions, modulo the "executable" marker on a
+file entry. When a file entry is marked as "executable," the resulting file should include
+the appropriate execute permission.
 
 ## Additional considerations
 

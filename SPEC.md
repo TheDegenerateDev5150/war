@@ -165,7 +165,7 @@ struct File {
     data: Vec<u8>,
 }
 
-/// How an storage entry has been compressed.
+/// How a storage entry has been compressed.
 enum Compression {
     /// No compression.
     Store,
